@@ -2,20 +2,22 @@ mod excel;
 mod mail;
 mod html;
 
+use std::fs;
 use iced::widget::{button, checkbox, column, container, responsive, row, scrollable, text, text_input};
 use iced::{alignment, theme, window, Application, Color, Command, Length, Renderer, Settings, Size, Theme};
 use iced::{Element};
-use iced::Alignment::Center;
 use iced::widget::text_input::Id;
 
 use iced_table::table;
 use lettre::Transport;
 use lettre::transport::smtp::authentication::Credentials;
 use native_dialog::{MessageDialog, MessageType};
+use serde::{Deserialize, Serialize};
 use crate::html::generate_html;
 use crate::mail::send_mail;
 
-pub const TOKEN: &'static str = "pctyuktfvtvybbhi";
+pub const SAVED_FILE: &'static str = "./auth.dll";
+
 
 #[derive(Debug)]
 enum Mailbox {
@@ -35,10 +37,11 @@ struct State {
     auth: AuthState,
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 struct AuthState {
     username: String,
     password: String,
+    save: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -60,11 +63,10 @@ struct Tasks {
 
 #[derive(Debug, Clone)]
 enum Message {
-    Loaded(Result<SavedState, LoadError>),
+    Loaded(AuthState),
     Username(String),
     Password(String),
-    Search(String),
-    SavePassword(bool),
+    Save(bool),
     Login,
     Import,
     Title(String),
@@ -75,8 +77,7 @@ enum Message {
     AllSelect(bool),
     Nop,
 }
-#[derive(Debug, Clone)]
-struct SavedState {}
+
 #[derive(Debug, Clone)]
 enum LoadError {}
 
@@ -98,8 +99,11 @@ impl Application for Mailbox {
 
     fn new(flags: Self::Flags) -> (Self, Command<Self::Message>) {
         (
-            Self::Config(AuthState::default()),
-            Command::perform(SavedState::load(), Message::Loaded),
+            Self::Config(AuthState {
+                save: true,
+                ..AuthState::default()
+            }),
+            Command::perform(AuthState::load(), Message::Loaded),
         )
     }
 
@@ -114,14 +118,17 @@ impl Application for Mailbox {
         match self {
             Mailbox::Config(state) => {
                 match message {
-                    Message::Loaded(result) => {
-                        result.unwrap();
+                    Message::Loaded(auth) => {
+                        *state = auth;
                     }
                     Message::Username(username) => {
                         state.username = username;
                     }
                     Message::Password(password) => {
                         state.password = password;
+                    }
+                    Message::Save(save) => {
+                        state.save = save;
                     }
                     Message::Login => {
                         if state.username.is_empty() || state.password.is_empty() {
@@ -136,6 +143,14 @@ impl Application for Mailbox {
                                 .unwrap();
                             return Command::none();
                         }
+
+                        if state.save {
+                            let data = serde_json::to_string(&state).unwrap();
+                            fs::write(SAVED_FILE, &data).unwrap();
+                        } else {
+                            fs::remove_file(SAVED_FILE).unwrap();
+                        }
+
                         *self = Mailbox::Main(State {
                             list: vec! {},
                             headers: vec![],
@@ -232,8 +247,8 @@ impl Application for Mailbox {
                     .padding(30)
                     .size(20);
 
-                let password_check = checkbox("保存密码", true)
-                    .on_toggle(Message::SavePassword);
+                let password_check = checkbox("保存密码", state.save)
+                    .on_toggle(Message::Save);
 
                 let btn = container(button("登录")
                     .padding([5, 10])
@@ -300,9 +315,12 @@ fn empty_message(message: &str) -> Element<'_, Message> {
         .into()
 }
 
-impl SavedState {
-    async fn load() -> Result<SavedState, LoadError> {
-        Ok(SavedState {})
+impl AuthState {
+    async fn load() -> AuthState {
+        match fs::read_to_string(SAVED_FILE) {
+            Ok(data) => serde_json::from_str(&data).unwrap(),
+            Err(_) => AuthState { save: true, ..AuthState::default() }
+        }
     }
 }
 
