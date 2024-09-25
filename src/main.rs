@@ -4,8 +4,9 @@ mod html;
 
 use std::fs;
 use iced::widget::{button, checkbox, column, container, responsive, row, scrollable, text, text_input};
-use iced::{alignment, theme, window, Application, Color, Command, Length, Renderer, Settings, Size, Theme};
+use iced::{alignment, event, keyboard, theme, window, Application, Color, Command, Event, Length, Renderer, Settings, Size, Subscription, Theme};
 use iced::{Element};
+use iced::keyboard::key;
 use iced::widget::text_input::Id;
 
 use iced_table::table;
@@ -17,6 +18,7 @@ use crate::html::generate_html;
 use crate::mail::send_mail;
 
 pub const SAVED_FILE: &'static str = "./auth.dll";
+pub const MAIL_FILE: &'static str = "./mail.dll";
 
 
 #[derive(Debug)]
@@ -35,6 +37,14 @@ struct State {
     title: String,
     remark: String,
     auth: AuthState,
+    send_message: String,
+    cur_page: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct MailData {
+    title: String,
+    remark: String,
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -75,6 +85,11 @@ enum Message {
     SyncHeader(scrollable::AbsoluteOffset),
     Enable(usize, bool),
     AllSelect(bool),
+    NextPage,
+    PrevPage,
+    BeginSend,
+    EndSend(Vec<Tasks>),
+    Event(Event),
     Nop,
 }
 
@@ -105,6 +120,10 @@ impl Application for Mailbox {
             }),
             Command::perform(AuthState::load(), Message::Loaded),
         )
+    }
+
+    fn subscription(&self) -> Subscription<Self::Message> {
+        event::listen().map(Message::Event)
     }
 
     fn title(&self) -> String {
@@ -151,16 +170,60 @@ impl Application for Mailbox {
                             fs::remove_file(SAVED_FILE).unwrap();
                         }
 
+                        let mail_data = read_mail_data();
                         *self = Mailbox::Main(State {
                             list: vec! {},
                             headers: vec![],
                             search_value: "".to_owned(),
                             header: scrollable::Id::unique(),
                             body: scrollable::Id::unique(),
-                            remark: "".to_owned(),
-                            title: "".to_owned(),
+                            remark: mail_data.remark,
+                            title: mail_data.title,
                             auth: state.clone(),
+                            cur_page: 0,
+                            send_message: String::new(),
                         });
+                    }
+                    Message::Event(event) => match event {
+                        Event::Keyboard(keyboard::Event::KeyPressed {
+                                            key: keyboard::Key::Named(key::Named::Enter),
+                                            ..
+                                        }) => {
+                            if state.username.is_empty() || state.password.is_empty() {
+                                return Command::none();
+                            }
+                            if !mail::test(&state.username, &state.password) {
+                                MessageDialog::new()
+                                    .set_type(MessageType::Error)
+                                    .set_title("登陆提示")
+                                    .set_text("账户名或密码有误，登陆失败！")
+                                    .show_alert()
+                                    .unwrap();
+                                return Command::none();
+                            }
+
+                            if state.save {
+                                let data = serde_json::to_string(&state).unwrap();
+                                fs::write(SAVED_FILE, &data).unwrap();
+                            } else {
+                                fs::remove_file(SAVED_FILE).unwrap();
+                            }
+
+                            let mail_data = read_mail_data();
+                            *self = Mailbox::Main(State {
+                                list: vec! {},
+                                headers: vec![],
+                                search_value: "".to_owned(),
+                                header: scrollable::Id::unique(),
+                                body: scrollable::Id::unique(),
+                                remark: mail_data.remark,
+                                title: mail_data.title,
+                                auth: state.clone(),
+                                cur_page: 0,
+                                send_message: String::new(),
+                            });
+                        }
+                        _ => {}
                     }
                     _ => {}
                 }
@@ -196,7 +259,7 @@ impl Application for Mailbox {
                             scrollable::scroll_to(state.header.clone(), offset)
                         ])
                     }
-                    Message::Send => {
+                    Message::BeginSend => {
                         if state.list.is_empty() {
                             return Command::none();
                         }
@@ -209,12 +272,31 @@ impl Application for Mailbox {
                         if !yes {
                             return Command::none();
                         }
-                        let creds = Credentials::new(state.auth.username.clone(), state.auth.password.clone());
-                        for task in &state.list {
-                            if task.status {
-                                let html = generate_html(task, &state.headers, &state.remark);
-                                send_mail(&state.title, &html, &format!("{}@wondersgroup.com", state.auth.username), &task.email, creds.clone());
-                            }
+                        state.send_message = "发送邮件中...".to_owned();
+
+                        return Command::perform(State::send(state.clone()), Message::EndSend);
+                    }
+                    Message::EndSend(tasks) => {
+                        if tasks.is_empty() {
+                            state.send_message = "发送完毕".to_string();
+                        } else {
+                            state.send_message = format!("发送完毕，剩余{}条邮件未发送成功", tasks.len());
+                        }
+                        state.list = tasks;
+
+                        set_mail_data(&MailData {
+                            remark: state.remark.clone(),
+                            title: state.title.clone(),
+                        });
+                    }
+                    Message::PrevPage => {
+                        if state.cur_page > 0 {
+                            state.cur_page -= 1;
+                        }
+                    }
+                    Message::NextPage => {
+                        if state.cur_page + 1 < (state.list.len() + 49) / 50 {
+                            state.cur_page += 1;
                         }
                     }
                     _ => {}
@@ -267,26 +349,49 @@ impl Application for Mailbox {
                     .style(theme::Button::Primary);
 
                 let send_button = button("发送邮件").padding([5, 10])
-                    .on_press(Message::Send)
+                    .on_press(Message::BeginSend)
                     .style(theme::Button::Primary);
-                let title = row![text_input("邮件主题配置", &state.title).on_input(Message::Title).padding(10).size(20).width(1300), import_button].spacing(20);
-                let remark = row![text_input("邮件提示信息", &state.remark).on_input(Message::Remark).padding(10).size(20).width(1300), send_button].spacing(20);
+
+                let send_info = if state.send_message.is_empty() {
+                    text("")
+                } else {
+                    text(&state.send_message)
+                };
+                let title = row![text_input("邮件主题配置", &state.title).on_input(Message::Title).padding(10).size(20).width(1100), import_button].spacing(20);
+                let remark = row![text_input("邮件提示信息", &state.remark).on_input(Message::Remark).padding(10).size(20).width(1100), send_button, send_info].spacing(20);
+
+                let prev_button = button("上一页").padding([5, 10])
+                    .on_press(Message::PrevPage)
+                    .style(theme::Button::Secondary);
+
+                let next_button = button("下一页").padding([5, 10])
+                    .on_press(Message::NextPage)
+                    .style(theme::Button::Secondary);
+
+                let page_info = text(format!("第 {}/{} 页", state.cur_page + 1, (state.list.len() + 49) / 50));
+                let page_buttons = row![prev_button, next_button, page_info].spacing(20);
 
                 let table: Element<_> = if state.list.is_empty() {
                     empty_message("请先导入Excel数据!")
                 } else {
-                    responsive(|size| {
+                    let next_index = (state.cur_page + 1) * 50;
+                    let next_index = if next_index > state.list.len() {
+                        state.list.len()
+                    } else {
+                        next_index
+                    };
+                    responsive(move |size| {
                         table(
                             state.header.clone(),
                             state.body.clone(),
                             &state.headers,
-                            &state.list,
+                            &state.list[state.cur_page * 50..next_index],
                             Message::SyncHeader,
                         ).into()
                     }).into()
                 };
 
-                let content = column![title, remark, table]
+                let content = column![title, remark, page_buttons, table]
                     .spacing(10);
 
                 // scrollable(container(content).center_x(Fill).padding(40)).into()
@@ -321,6 +426,31 @@ impl AuthState {
             Ok(data) => serde_json::from_str(&data).unwrap(),
             Err(_) => AuthState { save: true, ..AuthState::default() }
         }
+    }
+}
+
+impl State {
+    async fn send(state: State) -> Vec<Tasks> {
+        let creds = Credentials::new(state.auth.username.clone(), state.auth.password.clone());
+        let mut failed_task = vec![];
+        for task in state.list {
+            if task.status {
+                let html = generate_html(&task, &state.headers, &state.remark);
+                match send_mail(&format!("[{}]{}", &task.name, state.title), &html,
+                                &format!("{}@wondersgroup.com", state.auth.username),
+                                &task.email, creds.clone()) {
+                    Ok(_) => {}
+                    Err(e) => {
+                        eprintln!("Error sending email to {}: {}", task.email, e);
+                        failed_task.push(task.clone());
+                    }
+                }
+            } else {
+                failed_task.push(task.clone());
+            }
+        }
+
+        failed_task
     }
 }
 
@@ -359,7 +489,6 @@ impl<'a> table::Column<'a, Message, Theme, Renderer> for Header {
         if col_index == 0 {
             container(checkbox("", self.check).on_toggle(Message::AllSelect)).height(24).center_y().into()
         } else {
-            println!("{}", &self.name);
             container(text(&self.name)).height(24).center_y().into()
         }
     }
@@ -390,4 +519,15 @@ impl<'a> table::Column<'a, Message, Theme, Renderer> for Header {
     fn resize_offset(&self) -> Option<f32> {
         None
     }
+}
+
+fn read_mail_data() -> MailData {
+    match fs::read_to_string(MAIL_FILE) {
+        Ok(data) => serde_json::from_str(&data).unwrap(),
+        Err(_) => MailData::default()
+    }
+}
+
+fn set_mail_data(data: &MailData) {
+    fs::write(MAIL_FILE, serde_json::to_string(data).unwrap()).ok();
 }
