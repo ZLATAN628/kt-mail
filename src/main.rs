@@ -1,6 +1,7 @@
 mod excel;
 mod mail;
 mod html;
+mod log;
 
 use std::fs;
 use iced::widget::{button, checkbox, column, container, responsive, row, scrollable, text, text_input};
@@ -8,7 +9,7 @@ use iced::{alignment, event, keyboard, theme, window, Application, Color, Comman
 use iced::{Element};
 use iced::keyboard::key;
 use iced::widget::text_input::Id;
-
+use chrono::Local;
 use iced_table::table;
 use lettre::Transport;
 use lettre::transport::smtp::authentication::Credentials;
@@ -435,14 +436,16 @@ impl State {
         let mut failed_task = vec![];
         for task in state.list {
             if task.status {
+                log::info(&get_info(&task, "开始生成邮件 html", "INFO"));
                 let html = generate_html(&task, &state.headers, &state.remark);
+                log::info(&get_info(&task, "生成邮件 html 成功", "INFO"));
                 match send_mail(&format!("[{}]{}", &task.name, state.title), &html,
                                 &format!("{}@wondersgroup.com", state.auth.username),
                                 &task.email, creds.clone()) {
-                    Ok(_) => {}
+                    Ok(_) => { log::info(&get_info(&task, "邮件发送成功", "INFO")) }
                     Err(e) => {
-                        eprintln!("Error sending email to {}: {}", task.email, e);
                         failed_task.push(task.clone());
+                        log::info(&get_info(&task, &format!("发送失败: {}", e), "ERROR"))
                     }
                 }
             } else {
@@ -480,7 +483,11 @@ impl Tasks {
         self.info.get(index).map(|s| s.to_string()).unwrap_or_default()
     }
 }
-
+fn get_info(p0: &Tasks, msg: &str, type_str: &str) -> String {
+    let current_time = Local::now();
+    let formatted_time = current_time.format("%Y-%m-%d %H:%M:%S").to_string();
+    format!("{}-{}: {} {}\n", formatted_time, type_str, p0.name, msg)
+}
 
 impl<'a> table::Column<'a, Message, Theme, Renderer> for Header {
     type Row = Tasks;
